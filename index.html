@@ -20,17 +20,20 @@ body{
   display:flex;flex-direction:column;background:#0e1410;overflow:hidden;
 }
 #multwrap{
-  position:relative;z-index:3;text-align:center;
-  padding:calc(env(safe-area-inset-top) + 26px) 0 6px;pointer-events:none;
+  position:absolute;z-index:3;left:0;right:0;
+  top:calc(env(safe-area-inset-top) + 30px);
+  text-align:center;pointer-events:none;
 }
 #mult{
-  font-size:62px;font-weight:300;letter-spacing:-1.5px;line-height:1;
-  font-variant-numeric:tabular-nums;color:#f2f7ec;transition:color .2s;
+  font-size:66px;font-weight:300;letter-spacing:-1.5px;line-height:1;
+  font-variant-numeric:tabular-nums;color:#f2f7ec;
+  text-shadow:
+    0 0 10px #0e1410, 0 0 10px #0e1410,
+    0 0 20px #0e1410, 0 0 34px #0e1410;
 }
-#mult.win{color:#a8dc63;}
-#stage{position:relative;flex:1;min-height:0;z-index:1;}
+#stage{position:absolute;inset:0;z-index:1;}
 canvas{position:absolute;inset:0;width:100%;height:100%;display:block;}
-#bottom{position:relative;z-index:3;padding:0 18px calc(env(safe-area-inset-bottom) + 18px);}
+#bottom{position:absolute;left:0;right:0;bottom:0;z-index:3;padding:0 18px calc(env(safe-area-inset-bottom) + 18px);}
 #action{
   width:100%;border:none;border-radius:16px;padding:19px;
   font-family:inherit;font-size:17px;font-weight:600;letter-spacing:.3px;
@@ -48,15 +51,24 @@ canvas{position:absolute;inset:0;width:100%;height:100%;display:block;}
 }
 #fs svg{width:17px;height:17px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;}
 #fs.hidden{display:none;}
+#lose{
+  position:absolute;z-index:5;
+  top:calc(env(safe-area-inset-top) + 12px);left:12px;
+  height:38px;padding:0 13px;border:none;border-radius:11px;
+  background:rgba(255,255,255,0.07);color:#9aa694;
+  font-family:inherit;font-size:12px;letter-spacing:.4px;cursor:pointer;
+}
+#lose:disabled{opacity:.35;cursor:default;}
 </style>
 </head>
 <body>
 <div id="app">
+  <button id="lose">проигрыш</button>
   <button id="fs" aria-label="На весь экран">
     <svg viewBox="0 0 24 24"><path id="fsIcon" d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
   </button>
-  <div id="multwrap"><div id="mult">1.00x</div></div>
   <div id="stage"><canvas id="cv"></canvas></div>
+  <div id="multwrap"><div id="mult">1.00x</div></div>
   <div id="bottom"><button id="action">Посадить</button></div>
 </div>
 
@@ -73,22 +85,25 @@ canvas{position:absolute;inset:0;width:100%;height:100%;display:block;}
   var deadStem=[166,132,88], deadBranch=[166,132,88], deadBud=[226,214,128];
 
   /* ---- параметры ---- */
-  var MAX_BRANCHES=22;                       /* предохранитель, не рабочий регулятор */
-  var SPAWN_GAP_MIN=0.085, SPAWN_GAP_MAX=0.135;  /* интервал между ветками, доли высоты */
+  var MAX_BRANCHES=22;
+  var LEAF_OPEN_RATE=0.010;                  /* скорость раскрытия листа, ~1.7с */
+  var FRONT_CHANCE=0.30;                     /* доля веток, растущих на зрителя */                       /* предохранитель, не рабочий регулятор */
+  var SPAWN_GAP_MIN=0.058, SPAWN_GAP_MAX=0.092;  /* интервал между ветками, доли высоты */
   var SPAWN_LAG_FRAC=0.045;                  /* отступ точки крепления от кончика */
-  var SPEED_FRAC=0.0034;
-  var BRANCH_LEN_MIN=0.172, BRANCH_LEN_MAX=0.248; /* полная длина ветки, доли высоты */
+  var SPEED_FRAC=0.0029;
+  var BRANCH_LEN_MIN=0.040, BRANCH_LEN_MAX=0.062; /* полная длина ветки, доли высоты */
   var MULT_PER_SCREEN=0.68;
-  var CAMERA_FRAC=0.05;
+  var CAMERA_FRAC=0.055;
   var STEP_PX=1.0, MAX_TURN=0.030;
 
   var CW=402,CH=700,DPR=1;
   var CAMERA_TRIGGER_Y,REVEAL_SPEED,SPAWN_LAG_PX,REPULSE_RADIUS,START;
 
   var fullPath,revealIndex,revealAccum,nextSpawnAt,grownPx;
-  var branches,drawStart,cameraY,cameraActive,segmentCount,lastBranchSide,waveSign;
+  var branches,drawStart,cameraY,cameraActive,segmentCount,lastBranchSide,waveSign,sideMass,sameRun;
   var mode,witherT,multiplier;
   var dryStem,dryBranches,dryHold;
+  var bloomStem,bloomBranches,bloomT,bloomHold;
   var rafId=null,rng=Math.random;
 
   function stopLoop(){if(rafId!==null){cancelAnimationFrame(rafId);rafId=null;}}
@@ -99,11 +114,14 @@ canvas{position:absolute;inset:0;width:100%;height:100%;display:block;}
     CW=stage.clientWidth;CH=stage.clientHeight;
     canvas.width=Math.round(CW*DPR);canvas.height=Math.round(CH*DPR);
     ctx.setTransform(DPR,0,0,DPR,0,0);
-    CAMERA_TRIGGER_Y=CH*CAMERA_FRAC;
+    var mw=document.getElementById('multwrap');
+    var mb=mw?mw.getBoundingClientRect().bottom:CH*CAMERA_FRAC;
+    var sr=stage.getBoundingClientRect().top;
+    CAMERA_TRIGGER_Y=Math.max(CH*0.06,(mb-sr)+CH*0.055);
     REVEAL_SPEED=CH*SPEED_FRAC;
     SPAWN_LAG_PX=CH*SPAWN_LAG_FRAC;
     REPULSE_RADIUS=CH*0.055;
-    START={x:CW*0.24,y:CH*0.98};
+    START={x:CW*0.24,y:CH*0.90};
     if(mode==='idle'){resetState();draw();}
   }
 
@@ -140,12 +158,24 @@ canvas{position:absolute;inset:0;width:100%;height:100%;display:block;}
   function walkGuided(pts,maxTurn){
     if(pts.length<3) return pts;
     var margin=CW*0.16;
+    var selfR=CH*0.075;
+    var tailLo=Math.max(0,fullPath.length-Math.round(CH*1.1));
     var out=[pts[0]],cx=pts[0].x,cy=pts[0].y;
     var ang=Math.atan2(pts[1].y-pts[0].y,pts[1].x-pts[0].x);
     for(var i=1;i<pts.length;i++){
       var d=Math.hypot(pts[i].x-pts[i-1].x,pts[i].y-pts[i-1].y);
       if(d<1e-6) continue;
       var want=Math.atan2(pts[i].y-cy,pts[i].x-cx);
+      var sx=0,sy=0;
+      for(var j=tailLo;j<fullPath.length-Math.round(CH*0.16);j+=9){
+        var q=fullPath[j],qdx=cx-q.x,qdy=cy-q.y,qd=Math.hypot(qdx,qdy);
+        if(qd<selfR&&qd>0.01){var qf=1-qd/selfR;sx+=(qdx/qd)*qf;sy+=(qdy/qd)*qf;}
+      }
+      for(var m=0;m<out.length-Math.round(CH*0.16);m+=9){
+        var o=out[m],odx=cx-o.x,ody=cy-o.y,od=Math.hypot(odx,ody);
+        if(od<selfR&&od>0.01){var of=1-od/selfR;sx+=(odx/od)*of;sy+=(ody/od)*of;}
+      }
+      if(sx||sy) want=lerpAngle(want,Math.atan2(sy,sx),Math.min(0.55,Math.hypot(sx,sy)*0.30));
       var edge=0;
       if(cx<margin) edge=Math.min(1,(margin-cx)/margin);
       else if(cx>CW-margin) edge=-Math.min(1,(cx-(CW-margin))/margin);
@@ -207,8 +237,12 @@ canvas{position:absolute;inset:0;width:100%;height:100%;display:block;}
   /* ---- ветки ---- */
   function buildBranchPath(originIdx,side){
     var o=fullPath[originIdx],p=fullPath[Math.max(0,originIdx-16)];
-    var angle=Math.atan2(o.y-p.y,o.x-p.x)+side*(0.75+rng()*0.35);
-    var steps=Math.floor(CH*(BRANCH_LEN_MIN+rng()*(BRANCH_LEN_MAX-BRANCH_LEN_MIN))/1.6);
+    var tan=Math.atan2(o.y-p.y,o.x-p.x);
+    var spread=0.75+rng()*0.35;
+    var a1=tan+spread,a2=tan-spread;
+    var c1=Math.cos(a1)*side,c2=Math.cos(a2)*side;
+    var angle=(c1>=c2)?a1:a2;
+    var steps=Math.floor(CH*(BRANCH_LEN_MIN+rng()*(BRANCH_LEN_MAX-BRANCH_LEN_MIN))/0.7);
     var pts=[{x:o.x,y:o.y}],cx=o.x,cy=o.y,curv=0;
     var lo=Math.max(0,originIdx-Math.round(CH*0.45)),hi=Math.min(fullPath.length-1,originIdx+Math.round(CH*0.45));
     for(var s=0;s<steps;s++){
@@ -234,13 +268,27 @@ canvas{position:absolute;inset:0;width:100%;height:100%;display:block;}
       curv+=(rng()-0.5)*0.018;curv*=0.94;
       curv=Math.max(-0.028,Math.min(0.028,curv));
       angle+=curv;
-      cx+=Math.cos(angle)*1.6;cy+=Math.sin(angle)*1.6;
+      cx+=Math.cos(angle)*0.7;cy+=Math.sin(angle)*0.7;
       cx=Math.max(10,Math.min(CW-10,cx));
       pts.push({x:cx,y:cy});
     }
     return smoothPts(pts,2);}
 
-  function pickBranchSide(){var s=-lastBranchSide;if(rng()<0.25)s=-s;lastBranchSide=s;return s;}
+  function pickBranchSide(){
+    var top=[0,0];
+    for(var i=0;i<branches.length;i++){
+      var b=branches[i];
+      var sy=b.pts[0].y-cameraY;
+      if(sy>CH*0.62||b.front) continue;      /* только верхние две трети кадра, без фронтальных */
+      top[b.bside>0?1:0]+=b.mass;
+    }
+    var diff=top[1]-top[0];
+    var s;
+    if(Math.abs(diff)>0.45) s=diff>0?-1:1;
+    else { s=-lastBranchSide; if(rng()<0.12) s=-s; }
+    if(s===lastBranchSide){ sameRun++; } else { sameRun=1; }
+    if(sameRun>2){ s=-s; sameRun=1; }       /* не более двух подряд в одну сторону */
+    lastBranchSide=s;return s;}
 
   function scheduleNextSpawn(from){
     nextSpawnAt=from+CH*(SPAWN_GAP_MIN+rng()*(SPAWN_GAP_MAX-SPAWN_GAP_MIN));}
@@ -251,16 +299,49 @@ canvas{position:absolute;inset:0;width:100%;height:100%;display:block;}
     if(originIdx<18) return;
     scheduleNextSpawn(revealIndex);
     if(branches.length>=MAX_BRANCHES) return;
-    var pts=buildBranchPath(originIdx,pickBranchSide());
+    var front=rng()<FRONT_CHANCE;
+    var bside,pts;
+    if(front){
+      bside=rng()>0.5?1:-1;
+      pts=buildFrontPath(originIdx);
+    } else {
+      bside=pickBranchSide();
+      pts=buildBranchPath(originIdx,bside);
+    }
     var minY=Infinity;
     pts.forEach(function(pt){if(pt.y<minY)minY=pt.y;});
-    branches.push({pts:pts,originIdx:originIdx,revealIndex:0,topY:minY,appear:0,age:0});}
+    var side=[],cnt=0,lastDir=rng()>0.5?1:-1;
+    for(var li=0;li<cnt;li++){
+      if(rng()<0.7) lastDir=-lastDir;
+      var at=0.28+rng()*0.52;
+      side.push({idx:Math.round(at*(pts.length-1)),dir:lastDir,size:0.28+rng()*0.30,angle:0.75+rng()*0.65});
+    }
+    branches.push({pts:pts,originIdx:originIdx,revealIndex:0,revealF:0,topY:minY,appear:0,age:0,leaf:0,leafT:0,side:side,bside:bside,mass:0,front:front});}
+
+  /* ветка «на зрителя»: короткая, почти вертикальная проекция, сильное сужение */
+  function buildFrontPath(originIdx){
+    var o=fullPath[originIdx],p=fullPath[Math.max(0,originIdx-16)];
+    var tan=Math.atan2(o.y-p.y,o.x-p.x);
+    var down=rng()<0.45;
+    var base=down?Math.PI/2:-Math.PI/2;
+    var angle=base+(rng()<0.5?-1:1)*(0.55+rng()*0.35)+(tan-base)*0.10;
+    var steps=Math.floor(CH*(0.026+rng()*0.020)/0.7);
+    var pts=[{x:o.x,y:o.y}],cx=o.x,cy=o.y,curv=0;
+    for(var i=0;i<steps;i++){
+      curv+=(rng()-0.5)*0.020;curv*=0.93;
+      curv=Math.max(-0.03,Math.min(0.03,curv));
+      angle+=curv;
+      cx+=Math.cos(angle)*0.7;cy+=Math.sin(angle)*0.7;
+      cx=Math.max(10,Math.min(CW-10,cx));
+      pts.push({x:cx,y:cy});
+    }
+    return smoothPts(pts,2);}
 
   function resetState(){
     rng=mulberry32((Date.now()%1000000)+Math.floor(Math.random()*1000));
     fullPath=[];revealIndex=0;revealAccum=0;grownPx=0;
     branches=[];drawStart=0;cameraY=0;cameraActive=false;segmentCount=0;
-    lastBranchSide=rng()>0.5?1:-1;waveSign=rng()>0.5?1:-1;
+    lastBranchSide=rng()>0.5?1:-1;waveSign=rng()>0.5?1:-1;sideMass=[0,0];sameRun=0;
     witherT=0;multiplier=1;
     scheduleNextSpawn(0);
     extendMainPath();}
@@ -303,14 +384,14 @@ canvas{position:absolute;inset:0;width:100%;height:100%;display:block;}
   function startDry(){
     var visible=fullPath.slice(drawStart,revealIndex+1);
     var matured=Math.min(1,grownPx/(CH*3));
-    dryStem={pts:visible.slice(),wTip:CH*0.004,wBase:CH*0.017*(1+matured),span:CH*1.7};
+    dryStem={pts:visible.slice(),wTip:CH*0.0034,wBase:CH*0.019*(1+matured),span:CH*1.7};
     dryBranches=branches.map(function(b){
-      return {pts:b.pts.slice(0,b.revealIndex+1),ai:b.originIdx-drawStart};
+      return {pts:branchVisible(b),ai:b.originIdx-drawStart,leaf:b.leaf,side:b.side};
     });
     dryHold=0;}
 
   function updateDry(){
-    witherT=Math.min(1,witherT+0.0139);
+    witherT=Math.min(1,witherT+0.024);
     if(witherT>=1) dryHold++;}
 
   function drawDry(){
@@ -318,7 +399,7 @@ canvas{position:absolute;inset:0;width:100%;height:100%;display:block;}
     var cs=dryStem?crumple(dryStem.pts,wt):null;
     ctx.save();ctx.translate(0,-cameraY);
     if(dryBranches){
-      var bw=CH*0.006*(1-wt*0.45),bt=CH*0.0022*(1-wt*0.3);
+      var bw=CH*0.0044*(1-wt*0.45),bt=CH*0.0016*(1-wt*0.3);
       var bc=lerpC(branchColor,deadBranch,wt);
       dryBranches.forEach(function(b){
         var dx=0,dy=0;
@@ -326,8 +407,11 @@ canvas{position:absolute;inset:0;width:100%;height:100%;display:block;}
           dx=cs[b.ai].x-dryStem.pts[b.ai].x;
           dy=cs[b.ai].y-dryStem.pts[b.ai].y;
         }
+        var dp=crumple(curlTip(b.pts,wt),wt);
         ctx.save();ctx.translate(dx,dy);
-        drawPath(crumple(curlTip(b.pts,wt),wt),bc,bw,bt,1);
+        drawPath(dp,bc,bw,bt,1);
+        drawRoundLeaf(dp,b.leaf*(1-wt*0.35),lerpC([103,163,44],deadBranch,wt),
+                    'rgba(90,70,42,0.5)',b);
         ctx.restore();
       });
     }
@@ -349,6 +433,17 @@ canvas{position:absolute;inset:0;width:100%;height:100%;display:block;}
       ctx.beginPath();ctx.moveTo(pts[i-1].x,pts[i-1].y);ctx.lineTo(pts[i].x,pts[i].y);ctx.stroke();
     }}
 
+  function branchVisible(b){
+    var i=b.revealIndex;
+    if(i<1) return b.pts.slice(0,1);
+    var out=b.pts.slice(0,i+1);
+    var frac=(b.revealF||i)-i;
+    if(frac>0.001&&i+1<b.pts.length){
+      var a=b.pts[i],c=b.pts[i+1];
+      out.push({x:a.x+(c.x-a.x)*frac,y:a.y+(c.y-a.y)*frac});
+    }
+    return out;}
+
   function drawPath(pts,color,wBase,wTip,scaleMul){
     if(pts.length<2) return;
     ctx.strokeStyle=color;ctx.lineCap='round';ctx.lineJoin='round';
@@ -366,6 +461,62 @@ canvas{position:absolute;inset:0;width:100%;height:100%;display:block;}
     ctx.bezierCurveTo(-wid*0.74,-len*0.70,-wid*0.86,-len*0.26,0,0);
     ctx.closePath();ctx.fill();ctx.restore();}
 
+  /* ---- тройчатый лист на кончике ветки ---- */
+  var LEAF_FRAC=0.036;            /* размер листа, доли высоты экрана */
+  var leafCss='rgb(103,163,44)', leafVein='rgba(28,58,14,0.5)';
+  var frontLeafCss='rgb(150,203,79)', frontStemCss='rgb(112,172,44)';
+
+  function leafBlade(bx,by,ang,R,color,vein,face){
+    ctx.save();
+    ctx.translate(bx,by);ctx.rotate(ang);
+    var L=R*(face?1.55:2.05), W=R*(face?1.05:0.80);
+    ctx.fillStyle=color;
+    ctx.beginPath();
+    ctx.moveTo(0,0);
+    ctx.bezierCurveTo(L*0.10,-W*0.62, L*0.52,-W*1.05, L*0.90,-W*0.34);
+    ctx.bezierCurveTo(L*1.06,-W*0.06, L*1.06,W*0.06, L*0.90,W*0.34);
+    ctx.bezierCurveTo(L*0.52,W*1.05, L*0.10,W*0.62, 0,0);
+    ctx.closePath();ctx.fill();
+    if(R>CH*0.010){
+      ctx.strokeStyle=vein;ctx.lineWidth=Math.max(0.6,R*0.07);ctx.lineCap='round';
+      ctx.beginPath();ctx.moveTo(L*0.05,0);ctx.lineTo(L*0.92,0);ctx.stroke();
+    }
+    ctx.restore();}
+
+  function drawRoundLeaf(pts,grow,color,vein,rndSeed,face){
+    if(grow<=0.02||pts.length<4) return;
+    var n=pts.length;
+    var tip=pts[n-1],prev=pts[Math.max(0,n-14)];
+    var ang=Math.atan2(tip.y-prev.y,tip.x-prev.x);
+    var dirX=Math.cos(ang)>=0?1:-1;
+    var upTarget=dirX>0?-0.62:(-Math.PI+0.62);  /* вверх-в сторону */
+    ang=lerpAngle(ang,upTarget,0.55);
+    if(Math.sin(ang)>-0.10) ang=clampUpward(ang,0.10);  /* ниже горизонта не опускаем */
+    var R=CH*LEAF_FRAC*(0.42+0.58*grow)*(0.30+0.70*grow)*(face?1.24:1);
+    leafBlade(tip.x,tip.y,ang,R,color,vein,face);
+
+    var side=rndSeed&&rndSeed.side;
+    if(!side||!side.length) return;
+    if(grow<=0.08) return;
+    var g=Math.min(1,(grow-0.08)/0.30);
+    for(var si=0;si<side.length;si++){
+      var sp=side[si];
+      var idx=sp.idx;
+      if(idx<10||idx>=n-2) continue;
+      var p0=pts[idx],p1=pts[Math.max(0,idx-8)];
+      var ta=Math.atan2(p0.y-p1.y,p0.x-p1.x);
+      var local=Math.min(1,(n-1-idx)/(CH*0.055));
+      if(local<=0.004) continue;
+      local=local*local*(3-2*local);
+      var Rs=R*sp.size*g*local;
+      if(Rs<0.5) continue;
+      var la=ta+sp.dir*sp.angle;
+      var sx=p0.x+Math.cos(la)*Rs*0.6, sy=p0.y+Math.sin(la)*Rs*0.6;
+      ctx.strokeStyle=stemCss;ctx.lineWidth=Math.max(0.8,Rs*0.15);
+      ctx.beginPath();ctx.moveTo(p0.x,p0.y);ctx.lineTo(sx,sy);ctx.stroke();
+      leafBlade(sx,sy,la,Rs,color,vein,face);
+    }}
+
   function drawBud(pts,t){
     if(pts.length<3) return;
     var tip=pts[pts.length-1],prev=pts[Math.max(0,pts.length-24)];
@@ -376,22 +527,118 @@ canvas{position:absolute;inset:0;width:100%;height:100%;display:block;}
     drawTeardrop(tip.x,tip.y,ang+0.55+t*0.5,16*sc,5.0*sc);
     drawTeardrop(tip.x,tip.y,ang,23*sc,5.4*sc);}
 
+  /* ---- расцветание (выигрыш) ---- */
+  var BLOOM_FRAMES=150;
+  var petalColor=[236,241,214], petalEdge=[203,222,150], coreColor=[240,196,80];
+
+  function startBloom(){
+    var visible=fullPath.slice(drawStart,revealIndex+1);
+    var matured=Math.min(1,grownPx/(CH*3));
+    bloomStem={pts:visible.slice(),wTip:CH*0.0034,wBase:CH*0.019*(1+matured),span:CH*1.7};
+    var n=visible.length||1;
+    bloomBranches=branches.map(function(b){
+      var ai=b.originIdx-drawStart;
+      return {pts:branchVisible(b),leaf:b.leaf,side:b.side,trigger:Math.max(0,Math.min(1,ai/n))};
+    });
+    bloomT=0;bloomHold=0;}
+
+  function drawWave(pts,wPos,bandFrac,widthAt,fade){
+    var n=pts.length;
+    if(wPos<0||wPos>1||n<2) return;
+    var band=Math.max(14,n*bandFrac);
+    var c=n*wPos;
+    var from=Math.max(1,Math.floor(c-band)),to=Math.min(n-1,Math.ceil(c+band));
+    ctx.lineCap='round';ctx.lineJoin='round';
+    for(var i=from;i<=to;i++){
+      var k=1-Math.abs(i-c)/band;
+      if(k<=0) continue;
+      k=k*k*fade;
+      ctx.strokeStyle='rgba(214,240,168,'+(k*0.9).toFixed(3)+')';
+      ctx.lineWidth=widthAt(i,n)*(1+k*0.4);
+      ctx.beginPath();ctx.moveTo(pts[i-1].x,pts[i-1].y);ctx.lineTo(pts[i].x,pts[i].y);ctx.stroke();
+    }}
+
+  function drawFlower(x,y,ang,turn,open,scale){
+    if(turn<=0.02) return;
+    ctx.save();ctx.translate(x,y);ctx.rotate(ang);
+    ctx.scale(turn,1);
+    var R=CH*0.045*scale;
+    var spread=0.16+open*0.84;
+    for(var i=0;i<5;i++){
+      var a=(i/5)*Math.PI*2-Math.PI/2;
+      var len=R*(0.95+open*0.45);
+      var wid=R*0.46*spread;
+      ctx.save();ctx.rotate(a);
+      ctx.fillStyle='rgb('+petalColor[0]+','+petalColor[1]+','+petalColor[2]+')';
+      ctx.beginPath();
+      ctx.moveTo(0,0);
+      ctx.bezierCurveTo(wid,-len*0.32,wid*0.82,-len*0.86,0,-len);
+      ctx.bezierCurveTo(-wid*0.82,-len*0.86,-wid,-len*0.32,0,0);
+      ctx.closePath();ctx.fill();
+      ctx.strokeStyle='rgba('+petalEdge[0]+','+petalEdge[1]+','+petalEdge[2]+',0.85)';
+      ctx.lineWidth=Math.max(0.8,R*0.035);
+      ctx.stroke();
+      ctx.restore();
+    }
+    ctx.fillStyle='rgb('+coreColor[0]+','+coreColor[1]+','+coreColor[2]+')';
+    ctx.beginPath();ctx.arc(0,0,R*(0.06+open*0.24),0,Math.PI*2);ctx.fill();
+    ctx.restore();}
+
+  function drawBloom(){
+    var t=bloomT;
+    var wave=t<0.26?(t/0.26):-1;
+    var SWAP=0.26;
+    var showBud=t<SWAP;
+    var op=Math.max(0,Math.min(1,(t-SWAP)/0.62));
+    var open=1-Math.pow(1-op,2.4);
+    var bump=t<SWAP?0:Math.sin(Math.min(1,op/0.55)*Math.PI);
+
+    ctx.save();ctx.translate(0,-cameraY);
+    var brW=CH*0.0044,brTip=CH*0.0016;
+    bloomBranches.forEach(function(b){drawPath(b.pts,branchCss,brW,brTip,1);drawRoundLeaf(b.pts,b.leaf,leafCss,leafVein,b);});
+    drawAgedStem(bloomStem.pts,stemCss,bloomStem.wTip,bloomStem.wBase,bloomStem.span);
+    var bs=bloomStem;
+    var stemW=function(i,n){var r=Math.min(1,(n-i)/bs.span);return bs.wTip+(bs.wBase-bs.wTip)*r*r*r;};
+    if(wave>=0) drawWave(bs.pts,wave,0.09,stemW,1);
+    var pts=bloomStem.pts;
+    var tip=pts[pts.length-1],prev=pts[Math.max(0,pts.length-24)];
+    var ang=Math.atan2(tip.y-prev.y,tip.x-prev.x)+Math.PI/2;
+    if(showBud){
+      drawBud(pts,0);
+    } else {
+      var lift=CH*0.012*(0.3+open*0.7);
+      drawFlower(tip.x+Math.cos(ang-Math.PI/2)*lift,tip.y+Math.sin(ang-Math.PI/2)*lift,
+                 ang*0.25,1,open,(0.88+0.12*open)*(1+0.30*bump));
+    }
+    ctx.restore();}
+
   function draw(){
     ctx.clearRect(0,0,CW,CH);
+    if(mode==='blooming'){drawBloom();return;}
     if(mode==='withering'){drawDry();return;}
     if(!fullPath||!fullPath.length) return;
-    var stemTip=CH*0.004;
+    var stemTip=CH*0.0034;
     var matured=Math.min(1,grownPx/(CH*3));
-    var stemBase=CH*0.017*(1+matured);
-    var brW=CH*0.006, brTip=CH*0.0022;
+    var stemBase=CH*0.019*(1+matured);
+    var brW=CH*0.0044, brTip=CH*0.0016;
     ctx.save();ctx.translate(0,-cameraY);
     var visible=fullPath.slice(drawStart,revealIndex+1);
+    var frontList=[];
     branches.forEach(function(b){
       var pa=ctx.globalAlpha;ctx.globalAlpha=pa*b.appear;
-      drawPath(b.pts.slice(0,b.revealIndex+1),branchCss,brW,brTip,0.4+b.appear*0.6);
+      var vis=branchVisible(b);
+      if(b.front){ frontList.push({b:b,vis:vis,a:pa*b.appear}); ctx.globalAlpha=pa; return; }
+      drawPath(vis,branchCss,brW,brTip,0.4+b.appear*0.6);
+      drawRoundLeaf(vis,b.leaf,leafCss,leafVein,b);
       ctx.globalAlpha=pa;
     });
     drawAgedStem(visible,stemCss,stemTip,stemBase,CH*1.7);
+    frontList.forEach(function(f){
+      var pa=ctx.globalAlpha;ctx.globalAlpha=f.a;
+      drawPath(f.vis,frontStemCss,brW*1.9,brTip*0.6,1);
+      drawRoundLeaf(f.vis,f.b.leaf,frontLeafCss,leafVein,f.b,true);
+      ctx.globalAlpha=pa;
+    });
     drawBud(visible,0);
     ctx.restore();}
 
@@ -400,7 +647,6 @@ canvas{position:absolute;inset:0;width:100%;height:100%;display:block;}
     actionBtn.disabled=false;
     actionBtn.textContent='Посадить';
     actionBtn.classList.remove('stop');
-    multEl.classList.remove('win');
     multEl.textContent='1.00x';
     resetState();draw();}
 
@@ -423,7 +669,15 @@ canvas{position:absolute;inset:0;width:100%;height:100%;display:block;}
         var p=Math.min(1,b.age/branchLife);
         var emerge=Math.min(1,b.age/(branchLife*0.14));
         var f=(0.12+0.88*Math.pow(p,1.7))*emerge;
-        b.revealIndex=Math.min(b.pts.length-1,Math.round((b.pts.length-1)*f));
+        b.revealF=Math.min(b.pts.length-1,(b.pts.length-1)*f);
+        b.revealIndex=Math.floor(b.revealF);
+        b.leafT=Math.min(1,(b.leafT||0)+(b.front?LEAF_OPEN_RATE*0.32:LEAF_OPEN_RATE));
+        var lt=b.leafT;
+        var nl=lt*lt*(3-2*lt);
+        var nm=nl*(1+(b.side?b.side.length:0)*0.35);
+        if(!b.front) sideMass[b.bside>0?1:0]+=nm-b.mass;
+        b.mass=nm;
+        b.leaf=nl;
       });
       var tip=fullPath[revealIndex];
       var desired=tip.y-CAMERA_TRIGGER_Y;
@@ -432,7 +686,11 @@ canvas{position:absolute;inset:0;width:100%;height:100%;display:block;}
         cameraY+=(desired-cameraY)*0.10;
         if(cameraY>desired) cameraY=desired;
       }
-      branches=branches.filter(function(b){return (b.topY-cameraY)<=CH+40;});
+      branches=branches.filter(function(b){
+        if((b.topY-cameraY)<=CH+40) return true;
+        if(!b.front) sideMass[b.bside>0?1:0]-=b.mass;
+        return false;
+      });
       while(drawStart<revealIndex&&(fullPath[drawStart].y-cameraY)>CH+60){drawStart++;}
       if(drawStart>2000){
         fullPath.splice(0,drawStart);
@@ -441,9 +699,17 @@ canvas{position:absolute;inset:0;width:100%;height:100%;display:block;}
         branches.forEach(function(b){b.originIdx-=drawStart;});
         drawStart=0;
       }
+    } else if(mode==='blooming'){
+      bloomT=Math.min(1,bloomT+1/BLOOM_FRAMES);
+      if(bloomT>=1){
+        bloomHold++;
+        if(bloomHold>=75){finishRound();return;}
+      }
+      draw();
+      rafId=requestAnimationFrame(tick);return;
     } else if(mode==='withering'){
       updateDry();
-      if(dryHold>=42){finishRound();return;}
+      if(dryHold>=30){finishRound();return;}
     } else {draw();return;}
     draw();
     rafId=requestAnimationFrame(tick);}
@@ -451,21 +717,31 @@ canvas{position:absolute;inset:0;width:100%;height:100%;display:block;}
   actionBtn.addEventListener('click',function(){
     stopLoop();
     if(mode==='active'){
-      multEl.classList.add('win');
-      witherT=0;mode='withering';
-      startDry();
+      mode='blooming';
+      startBloom();
       actionBtn.disabled=true;
       actionBtn.textContent='Собрано';
       actionBtn.classList.remove('stop');
       startLoop();
     } else if(mode==='idle'){
       resetState();mode='active';
-      multEl.classList.remove('win');
-      multEl.textContent='1.00x';
+        multEl.textContent='1.00x';
       actionBtn.textContent='Собрать';
       actionBtn.classList.add('stop');
       startLoop();
     }
+  });
+
+  var loseBtn=document.getElementById('lose');
+  loseBtn.addEventListener('click',function(){
+    if(mode!=='active') return;
+    stopLoop();
+    witherT=0;mode='withering';
+    startDry();
+    actionBtn.disabled=true;
+    actionBtn.textContent='Сгорело';
+    actionBtn.classList.remove('stop');
+    startLoop();
   });
 
   window.addEventListener('resize',resize);
